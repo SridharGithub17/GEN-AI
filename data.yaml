@@ -1,0 +1,82 @@
+- answer: "Please go through the data below for answer"
+  input: "Identify the latest 5 transactions for Burger king from FIN_ACCT_TXNS table"
+  sql_cmd: |
+    SELECT "txn_amt", "txn_value_date", "account_number", "txn_ref_no", "txn_desc"
+    FROM "DEMO2"."FIN_ACCT_TXNS"
+    ORDER BY "txn_value_date" DESC
+    LIMIT 5;
+  sql_result: '[]'
+  table_info: |
+    tables:
+      - name: "FIN_ACCT_TXNS"
+        columns:
+          - name: "txn_amt"
+            type: character varying
+          - name: "txn_value_date"
+            type: character varying
+          - name: "account_number"
+            type: character varying
+          - name: "txn_ref_no"
+            type: character varying
+
+- answer: "Please go through the data below for answer"
+  input: "Which account had the highest transaction amount in the last month?"
+  sql_cmd: |
+    SELECT "account_number", MAX("txn_amt") AS max_transaction
+    FROM "DEMO2"."FIN_ACCT_TXNS"
+    WHERE "txn_value_date" >= '2024-09-01'
+    GROUP BY "account_number"
+    ORDER BY max_transaction DESC
+    LIMIT 1;
+  sql_result: '[("9876543210", "1000.00")]'
+  table_info: |
+    tables:
+      - name: "FIN_ACCT_TXNS"
+        columns:
+          - name: "account_number"
+            type: character varying
+          - name: "txn_amt"
+            type: character varying
+          - name: "txn_value_date"
+            type: character varying
+
+- answer: "Please go through the data below for answer"
+  input: "List the distinct transaction product types from FIN_ACCT_TXNS."
+  sql_cmd: |
+    SELECT DISTINCT "V_AML_MNTR_TXN_PROD_TYPE_CD"
+    FROM "DEMO2"."FIN_ACCT_TXNS";
+  sql_result: '[("CCARD"), ("LOAN"), ("MORTGAGE")]'
+  table_info: |
+    tables:
+      - name: "FIN_ACCT_TXNS"
+        columns:
+          - name: "V_AML_MNTR_TXN_PROD_TYPE_CD"
+            type: character varying
+
+- answer: "Please go through the data below for answer"
+  input: "Find the total transaction amount for the NACHA_5 code in SRC2_FILE1."
+  sql_cmd: |
+    SELECT SUM("TRAN_AMT") AS total_amount
+    FROM "DEMO2"."SRC2_DATA1"
+    WHERE "NACHA_5" IS NOT NULL;
+  sql_result: '[("25000.00")]'
+  table_info: |
+    tables:
+      - name: "SRC2_DATA1"
+        columns:
+          - name: "NACHA_5"
+            type: character varying
+          - name: "TRAN_AMT"
+            type: character varying
+
+- answer: "Please go through the data below for answer"
+  input: "Identify all transactions on '2024-09-15' from SRC1_FILE."
+  sql_cmd: |
+    SELECT *
+    FROM "DEMO2"."SRC1_DATA"
+    WHERE "DL_AS_OF_DATE" = '2024-09-15';
+  sql_result: '[("ACC123", "500.00", "2024-09-15"), ("ACC456", "300.00", "2024-09-15")]'
+  table_info: |
+    tables:
+      - name: "SRC1_DATA"
+

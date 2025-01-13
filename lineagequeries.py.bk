@@ -1,0 +1,373 @@
+from langchain_community.utilities.sql_database import SQLDatabase
+import pandas as pd
+import streamlit as st
+import SQLUtility
+import PlotGraph as pg
+
+mapping_gui_template=r"MATCH(N:{0}) WHERE N.TRAN_AMT={1} and N.TRAN_ACCT='{2}' AND N.TRAN_DT='{3}' RETURN N"	
+
+mapping_template_expanded=r="MATCH (A:{0})<-[:EXTRACTED_FROM_precsa]-(B:PRECSA)  <-[:EXTRACTED_FROM_stitch]-(C:STITCH)\
+MATCH (C:STITCH)<-[:EXTRACTED_FROM_kde1]-(D:KDE1)<-[:EXTRACTED_FROM_Src1Stg1]-(F:SRC1_STG)<-[:EXTRACTED_FROM_Src1File1]-(I:SRC1_FILE)\
+MATCH (C:STITCH)<-[:EXTRACTED_FROM_kde2]-(E:KDE2)<-[:EXTRACTED_FROM_Src2Stg1]-(G:SRC2_STG1)<-[:EXTRACTED_FROM_Src2File1]-(J:SRC2_FILE1)\
+MATCH (C:STITCH)<-[:EXTRACTED_FROM_kde2]-(E:KDE2)<-[:EXTRACTED_FROM_Src2Stg2]-(H:SRC2_STG2)<-[:EXTRACTED_FROM_Src2File2]-(K:SRC2_FILE2)\
+WHERE  A.TRAN_AMT={1}  and A.TRAN_ACCT='{2}' AND A.TRAN_DT='{3}' \
+RETURN A, B,C,D,E,F,G,H,I,J,K" 
+
+stg_src1_query='SELECT "TRAN_DESC", "ORIGNTR_ACCT_ID" \
+    from	"TD_DEMO_SCHEMA"."STG_SRC1_STITCHED" \
+where  "TRAN_AMT" = cast(:tranamt as varchar(20)) 	'''
+
+
+#
+query='SELECT "V_TXN_DESC", "V_AML_MNTR_TXN_PROD_TYPE_CD", "V_ACCOUNT_NUMBER", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", \
+"V_TXN_REF_NO"\
+	FROM "TD_DEMO_SCHEMA"."FIN_ACCT_TXNS" \
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" =cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100));'''
+
+#PRE-CSA TO CSA FIN_ACCT_TXNS:
+#############################
+
+precsa_csa='SELECT "V_TXN_DESC", "V_AML_MNTR_TXN_PROD_TYPE_CD", "V_ACCOUNT_NUMBER", "DRCR_IND", "TRAN_AMT", "TRAN_DT", \
+"TRAN_ACCT", "V_TXN_REF_NO" \
+	FROM "TD_DEMO_SCHEMA"."FIN_ACCT_TXNS" \
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20)) \
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100)) \
+	UNION \
+SELECT  "V_TXN_DESC", "V_AML_MNTR_TXN_PROD_TYPE_CD", "V_ACCOUNT_NUMBER", "DRCR_IND", "TRAN_AMT", \
+"TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO" \
+	FROM "TD_DEMO_SCHEMA"."STG_ACCT_TXNS" \
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	 \
+	and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100));'
+
+
+
+
+#STITCH TO PRE-CSA;
+###################
+
+stitch_to_precsa_query='''SELECT  "V_TXN_DESC", "V_AML_MNTR_TXN_PROD_TYPE_CD", "V_ACCOUNT_NUMBER", "DRCR_IND", "TRAN_AMT", "TRAN_DT", \
+"TRAN_ACCT", "V_TXN_REF_NO" \
+	FROM "TD_DEMO_SCHEMA"."STG_ACCT_TXNS" \
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100)) \
+	UNION \
+SELECT  "TRAN_DESC", "AML_MNTR_TRAN_PROD_TYPE_CD" AS V_AML_MNTR_TXN_PROD_TYPE_CD, \
+	case when "DRCR_IND" = 'C'  then "BNF_ACCT_ID" ELSE "ORIGNTR_ACCT_ID" end  as "V_ACCOUNT_NUMBER", \
+	 "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO"  \
+	FROM "TD_DEMO_SCHEMA"."STG_SRC1_STITCHED" \
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100));'''
+
+
+#KDE to Stitch
+
+KDE_To_Stitch_query='''SELECT 'STITCH' as "Type", "TRAN_DESC", "ORIGNTR_ACCT_ID", "BNF_ACCT_ID", "AML_MNTR_TRAN_PROD_TYPE_CD", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO"
+	FROM "TD_DEMO_SCHEMA"."STG_SRC1_STITCHED"
+	where "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+UNION
+(
+WITH KDE1_CTE AS(
+	SELECT  "AML_MNTR_TRAN_PROD_TYPE_CD","TRAN_DESC","BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO"
+	FROM "TD_DEMO_SCHEMA"."STG_SRC1_KDE"
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+)
+	,
+	KDE2_CTE AS(
+	SELECT  "BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO", "NACHA_5", "NACHA_6"
+	FROM "TD_DEMO_SCHEMA"."STG_SRC2_KDE"
+	where  "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+	)
+,
+	JOINS AS(
+
+	SELECT 
+	"TRAN_DESC","AML_MNTR_TRAN_PROD_TYPE_CD",
+	CASE WHEN "DRCR_IND" = 'C' THEN  KDE1_CTE."BNF_ACCT_ID" ELSE NULL END  AS "BNF_ACCT_ID",
+	CASE WHEN "DRCR_IND" = 'D' THEN  KDE1_CTE."ORIGNTR_ACCT_ID" ELSE NULL END  AS "ORIGNTR_ACCT_ID",
+	"DRCR_IND",
+	KDE1_CTE."V_TXN_REF_NO",
+	KDE1_CTE."TRAN_AMT",
+	KDE1_CTE."TRAN_DT", 
+	KDE1_CTE."TRAN_ACCT"
+	FROM KDE1_CTE JOIN KDE2_CTE
+	ON KDE1_CTE."TRAN_AMT" = KDE2_CTE."TRAN_AMT" 
+	AND KDE1_CTE."TRAN_ACCT" = KDE2_CTE."TRAN_ACCT" 
+	AND KDE1_CTE."TRAN_DT" = KDE2_CTE."TRAN_DT" 
+	)
+SELECT 'KDE-JOINS',
+	"TRAN_DESC", "ORIGNTR_ACCT_ID", "BNF_ACCT_ID", "AML_MNTR_TRAN_PROD_TYPE_CD", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO"
+	 FROM JOINS 
+	);'''
+
+
+
+#SRC1_STAGING_DATA TO STG_SRC1_KDE
+#########################################
+	
+stg_src1_KDE_query='''SELECT 'SRC1-KDE' as "Type","TRAN_DESC", "AML_MNTR_TRAN_PROD_TYPE_CD", "BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO"
+	FROM "TD_DEMO_SCHEMA"."STG_SRC1_KDE"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+UNION
+(
+
+SELECT 'SRC1-STG',"TRAN_DESC", "AML_MNTR_TRAN_PROD_TYPE_CD", "BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT",
+	"ACC_ID"||"TRAN_AMT"||"TRAN_ACCT" AS  "V_TXN_REF_NO"
+	FROM (
+	SELECT "TRAN_AMT", "TRAN_DT","ACC_ID",
+	CASE WHEN "ACC_ID" ='457' THEN 'SRC1-'|| "ENTP_2_TYPE" ELSE NULL END AS "BNF_ACCT_ID",
+	CASE WHEN "ACC_ID" IN ('458',' 456') THEN 'SRC1-'||"ENTP_3_CTL1"  ELSE NULL END "ORIGNTR_ACCT_ID",
+	CASE  "ACC_USR_TR_CD"
+		WHEN 'acc_tr_cd1' then   "ENTP_1_USR_TR_CD"
+	    WHEN 'acc_tr_cd2' then  "ENTP_2_USR_TR_CD"
+		WHEN 'acc_tr_cd3'  then  "ENTP_3_USR_TR_CD"	
+		WHEN 'acc_tr_cd4'  then  "ENTP_4_USR_TR_CD"	
+		Else null 
+	END  AS  	"AML_MNTR_TRAN_PROD_TYPE_CD",
+	"ACC_ENT_DESC"|| ' ' || "ACC_ID"  AS "TRAN_DESC",
+	 CASE 
+		WHEN  "ACC_USR_TR_CD" ='acc_tr_cd1' or  "ACC_USR_TR_CD"='acc_tr_cd3'  then  "ENTP_3_CTL1"
+	    WHEN  "ACC_USR_TR_CD" ='acc_tr_cd2' THEN "ENTP_2_TYPE"
+		ELSE  null END  AS "TRAN_ACCT"	
+	FROM "TD_DEMO_SCHEMA"."SRC1_STAGING_DATA"
+	
+) STAGING1
+WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+	);'''
+
+
+#SRC2_STAGING_DATA1 & SRC2_STAGING_DATA2  TO STG_SRC2_KDE
+########################################################
+
+stg_src2_KDE_query='''SELECT  'SRC2-KDE' as "Type", "BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO", "NACHA_5", "NACHA_6"
+	FROM "TD_DEMO_SCHEMA"."STG_SRC2_KDE"
+	where
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+UNION
+(
+WITH SRC2_CTE1 AS (
+SELECT "NACHA_5", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_STAGING_DATA1"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+)
+,
+SRC2_CTE2 AS (	
+SELECT "NACHA_6", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_STAGING_DATA2"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	and "TRAN_ACCT"= cast(:tranacct as varchar(100))
+)
+,
+JOINS_SRC_CTES AS (
+	SELECT 	
+	case 
+		when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'C'  then SUBSTR(SRC2_CTE2."NACHA_6", -8)
+		when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'D' then SUBSTR(SRC2_CTE1."NACHA_5", -8)
+		else null 
+	end as  "BNF_ACCT_ID" 
+	,
+	case 
+		when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'C'  then SUBSTR(SRC2_CTE1."NACHA_5", -8)  
+		when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'D' then SUBSTR(SRC2_CTE2."NACHA_6", -8)
+	else null 
+	end  as "ORIGNTR_ACCT_ID"
+	,
+	case 
+		when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'C' then  'C'
+	 	when SUBSTR(SRC2_CTE2."NACHA_6" ,2,1) = 'D' then  'D'
+	ELSE NULL 
+	end as "DRCR_IND",
+	SRC2_CTE1."TRAN_AMT"    "TRAN_AMT",
+	SRC2_CTE1."TRAN_DT" AS  "TRAN_DT",
+	SRC2_CTE1."TRAN_ACCT" AS "TRAN_ACCT",
+	SUBSTR(SRC2_CTE1."NACHA_5",1,3)||SRC2_CTE1."TRAN_AMT"||SRC2_CTE1."TRAN_ACCT"  as "V_TXN_REF_NO", 
+	SRC2_CTE1."NACHA_5" as "NACHA_5",
+	SRC2_CTE2."NACHA_6" as  "NACHA_6"
+	FROM SRC2_CTE1 JOIN SRC2_CTE2
+	ON SRC2_CTE1."TRAN_AMT" = SRC2_CTE2."TRAN_AMT" 
+	AND SRC2_CTE1."TRAN_ACCT" = SRC2_CTE2."TRAN_ACCT" 
+	AND SRC2_CTE1."TRAN_DT" = SRC2_CTE2."TRAN_DT" 
+)
+SELECT 'SRC2-STAGES',
+	"BNF_ACCT_ID", "ORIGNTR_ACCT_ID", "DRCR_IND", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT", "V_TXN_REF_NO", "NACHA_5", "NACHA_6"
+	FROM JOINS_SRC_CTES 
+	);'''
+
+
+
+
+#SRC1_FILE TO SRC1_STAGING_DATA;
+###################################
+
+src1_Staging_data='''SELECT 'STG' as "Type","ACC_ID", "ACC_ENT_DESC", "ACC_USR_TR_CD", "ENTP_1_USR_TR_CD", "ENTP_2_USR_TR_CD", "ENTP_3_USR_TR_CD", "ENTP_4_USR_TR_CD", "ENTP_2_TYPE", "ENTP_3_CTL1", "TRAN_AMT", "TRAN_DT"
+	FROM "TD_DEMO_SCHEMA"."SRC1_STAGING_DATA"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	UNION
+
+	
+SELECT 'SRC',"ACC_ID", "ACC_ENT_DESC", "ACC_USR_TR_CD", "ENTP_1_USR_TR_CD", "ENTP_2_USR_TR_CD", "ENTP_3_USR_TR_CD", "ENTP_4_USR_TR_CD", "ENTP_2_TYPE", "ENTP_3_CTL1", "TRAN_AMT", "TRAN_DT"
+	FROM "TD_DEMO_SCHEMA"."SRC1_FILE"
+WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	;'''
+
+
+
+#SRC2_FILE1 TO SRC2_STAGING_DATA1
+###################################
+
+
+src2_Staging_data='''SELECT 'STG' as "Type", "NACHA_5", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_FILE1"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	
+UNION
+SELECT 'SRC',"NACHA_5", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_STAGING_DATA1"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	;'''
+
+
+#SRC2_FILE2 TO SRC2_STAGING_DATA2	
+
+src2_Staging_data2='''SELECT 'STG' as "Type","NACHA_6", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_FILE2"
+	WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	
+UNION
+SELECT 'SRC',"NACHA_6", "TRAN_AMT", "TRAN_DT", "TRAN_ACCT"
+	FROM "TD_DEMO_SCHEMA"."SRC2_STAGING_DATA2"
+WHERE 
+	 "TRAN_AMT" = cast(:tranamt as varchar(20))	\
+		and "TRAN_DT" = cast(:trandate as varchar(20)) \
+	;'''
+
+
+def print_response(db_response,description):
+    st.write(description)
+    if(db_response is not None and len(db_response)>0):
+          choice_default_mod = pd.DataFrame.from_dict(eval(db_response))
+          st.table(choice_default_mod)
+    else:
+        st.write('No Data available')
+
+    #print(tabulate.tabulate(response,headers='keys', tablefmt="pretty"))
+
+
+
+def display_lineage(order,txn_amt,txn_dt,txn_acct):
+    tran_amt=int(txn_amt)   
+    tran_date=txn_dt
+    tran_acct=int(txn_acct)
+    st.write('Values Parsed: Tran Amt:{0}, Tran Date:{1}, Tran Acct:{2}.'.format(tran_amt,tran_date,tran_acct))
+    #Bottom to Top
+    if(order == 1):
+        response=SQLUtility.execute(stg_src1_query,parameters={'tranamt':tran_amt})
+        print_response(response,'Source 1 to Stage')
+        
+        response=SQLUtility.execute(src2_Staging_data2,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Source 2 Staging Data')
+
+        response=SQLUtility.execute(src1_Staging_data,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Source 1 Staging data')
+
+        response=SQLUtility.execute(src2_Staging_data,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Source 2 Staging Data')
+        
+        response=SQLUtility.execute(stg_src2_KDE_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Stage Source 2 to KDE')
+
+        response=SQLUtility.execute(stg_src1_KDE_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Stage Source 1 to KDE')
+
+        response=SQLUtility.execute(KDE_To_Stitch_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'KDE to Stitching')
+
+        response=SQLUtility.execute(stitch_to_precsa_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Stitching to Pre CSA')
+
+        response=SQLUtility.execute(precsa_csa,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(response,'Pre CSA to CSA')
+
+        resp=SQLUtility.execute(query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+        print_response(resp,'CSA')
+
+
+    elif order == 2:
+          #Top to Bottom
+          resp=SQLUtility.execute(query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(resp,'CSA')
+          response=SQLUtility.execute(precsa_csa,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Pre CSA to CSA')
+          response=SQLUtility.execute(stitch_to_precsa_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Stitching to Pre CSA')
+          response=SQLUtility.execute(KDE_To_Stitch_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'KDE to Stitching')
+          response=SQLUtility.execute(stg_src1_KDE_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Stage Source 1 to KDE')
+          response=SQLUtility.execute(stg_src2_KDE_query,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Stage Source 2 to KDE')
+          response=SQLUtility.execute(src2_Staging_data,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Source 2 Staging Data')
+          response=SQLUtility.execute(src1_Staging_data,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Source 1 Staging data')
+          response=SQLUtility.execute(src2_Staging_data2,parameters={'tranamt':tran_amt,'trandate':tran_date,'tranacct':tran_acct})
+          print_response(response,'Source 2 Staging Data')
+          
+          response=SQLUtility.execute(stg_src1_query,parameters={'tranamt':tran_amt})
+          print_response(response,'Stage to Source 1')
+    cypher_query=mapping_template_expanded.format('CSA',tran_amt,tran_acct,tran_date)
+    st.write(cypher_query)
+    print('Plotting Graph')
+    fig=pg.get_graph_in_streamlit(cypher_query)
+    st.plotly_chart(fig) 
+    
+
+def get_the_results(order,txn_amt,txn_dt,txn_acct):
+    print('=================================================')
+    print(order)
+    print(txn_amt)
+    print(txn_dt)
+    print(txn_acct)
+    display_lineage(order,txn_amt,txn_dt,txn_acct)
+    
+def look_for_records(q):
+    try:
+        print(q)
+        print('inside look_for_records')
+
+    except:
+         print('exception occured')
